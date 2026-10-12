@@ -1,0 +1,251 @@
+# =============================================================================
+#  tms-agent — Stack d'infrastructure de développement local
+# =============================================================================
+#  Lancement (toujours avec le .env de la racine) :
+#      docker compose --env-file ../.env up -d
+#  ou, plus simplement :
+#      ../scripts/infra.sh up
+#
+#  NE SONT PAS CONTENEURISÉS — volontairement :
+#    - PostgreSQL : natif sur l'hôte, port 5432  (prod : PostgreSQL Flexible Server)
+#    - Redis      : natif sur l'hôte, port 6379  (prod : Azure Managed Redis)
+#  Les conteneurs les joignent par `host.docker.internal`, résolu via
+#  `extra_hosts: host-gateway`. Cela reproduit la topologie de production, où
+#  ces deux bases sont des services externes aux conteneurs applicatifs.
+#
+#  Profils :
+#    (défaut) clickhouse, minio, langfuse-worker, langfuse-web, litellm-proxy
+#    gpu      ajoute vllm-qwen (inférence locale, nécessite un GPU NVIDIA)
+# =============================================================================
+
+name: tms-infra
+
+x-host-gateway: &host-gateway
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+x-langfuse-env: &langfuse-env
+  # --- Base applicative : PostgreSQL natif de l'hôte, base dédiée ---
+  DATABASE_URL: ${LANGFUSE_DATABASE_URL}
+  # --- Secrets ---
+  SALT: ${SALT}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+  NEXTAUTH_URL: ${NEXTAUTH_URL}
+  TELEMETRY_ENABLED: ${TELEMETRY_ENABLED:-false}
+  LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: "false"
+  # --- ClickHouse (conteneur) ---
+  CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+  CLICKHOUSE_URL: http://clickhouse:8123
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  # --- Redis natif de l'hôte, base logique dédiée (cf. .env) ---
+  REDIS_CONNECTION_STRING: redis://host.docker.internal:${REDIS_PORT}/${REDIS_DB_LANGFUSE}
+  LANGFUSE_BULLMQ_SKIP_REDIS_VERSION_CHECK: "true"
+  # --- Stockage objet : MinIO tient lieu d'Azure Blob Storage ---
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${MINIO_BUCKET}
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio:9000
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: ${MINIO_BUCKET}
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # ClickHouse — stockage analytique des traces Langfuse
+  # ---------------------------------------------------------------------------
+  clickhouse:
+    image: docker.io/clickhouse/clickhouse-server:25.12
+    container_name: tms-clickhouse
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-default}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+    ports:
+      - "127.0.0.1:8123:8123"
+      - "127.0.0.1:9000:9000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # MinIO — compatible S3, tient lieu d'Azure Blob Storage en local
+  # ---------------------------------------------------------------------------
+  minio:
+    image: cgr.dev/chainguard/minio:latest
+    container_name: tms-minio
+    restart: unless-stopped
+    entrypoint: sh
+    command: -c 'mkdir -p /data/${MINIO_BUCKET} && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "127.0.0.1:9090:9000"   # API S3
+      - "127.0.0.1:9091:9001"   # Console web
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # ---------------------------------------------------------------------------
+  # Langfuse Worker — ingestion des traces, applique les migrations ClickHouse
+  # ---------------------------------------------------------------------------
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4
+    container_name: tms-langfuse-worker
+    restart: unless-stopped
+    <<: *host-gateway
+    depends_on:
+      clickhouse: { condition: service_healthy }
+      minio:      { condition: service_healthy }
+    ports:
+      - "127.0.0.1:3030:3030"
+    environment:
+      <<: *langfuse-env
+
+  # ---------------------------------------------------------------------------
+  # Langfuse Web — interface d'observabilité et API d'ingestion
+  # ---------------------------------------------------------------------------
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:4
+    container_name: tms-langfuse-web
+    restart: unless-stopped
+    <<: *host-gateway
+    depends_on:
+      clickhouse: { condition: service_healthy }
+      minio:      { condition: service_healthy }
+    ports:
+      - "3000:3000"
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9090
+      LANGFUSE_S3_MEDIA_UPLOAD_INTERNAL_ENDPOINT: http://minio:9000
+      # Provisioning au premier démarrage : organisation, projet, clés, compte
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME}
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD}
+
+  # ---------------------------------------------------------------------------
+  # vLLM — inférence locale sur GPU (profil `gpu`)
+  #   RTX 4070 Laptop / 8 Go. Le modèle se choisit par la VRAM restante une
+  #   fois les poids chargés : Qwen2.5-7B AWQ n'y tenait qu'à 4 096 jetons, ce
+  #   qui ne suffit pas au socle d'une enquête (~3 750 jetons). Qwen3.5-4B en
+  #   4 bits tient en 4 Go et son attention hybride — 8 couches d'attention
+  #   complète sur 32 — rend le cache KV assez petit pour 32 768 jetons.
+  # ---------------------------------------------------------------------------
+  vllm-qwen:
+    image: vllm/vllm-openai:v0.30.0
+    container_name: tms-vllm-qwen
+    profiles: ["gpu"]
+    restart: unless-stopped
+    ipc: host
+    ports:
+      - "8001:8000"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      # Sur une ligne lente, les allers-retours de vérification vers le Hub
+      # ajoutent des minutes à chaque démarrage, alors que les poids sont déjà
+      # sur le disque. `1` lit le cache et ne contacte personne — à condition
+      # que le modèle y soit déjà.
+      HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+    command:
+      - --model=${VLLM_MODEL}
+      - --served-model-name=local-qwen
+      - --gpu-memory-utilization=${VLLM_GPU_MEMORY_UTILIZATION}
+      - --max-model-len=${VLLM_MAX_MODEL_LEN}
+      - --enable-prefix-caching
+      # Cache KV en 8 bits : il divise par deux la mémoire du contexte, pour
+      # une perte de précision négligeable sur des clés/valeurs d'attention.
+      # C'est lui qui rend 32 768 jetons atteignables sur 8 Go.
+      - --kv-cache-dtype=${VLLM_KV_CACHE_DTYPE}
+      # Huit séquences simultanées au lieu de 256 : nous servons deux enquêtes
+      # en parallèle et un assistant. Réserver pour 256 prend de la mémoire
+      # d'activation qui manquerait au contexte.
+      - --max-num-seqs=${VLLM_MAX_NUM_SEQS}
+      - --enable-auto-tool-choice
+      - --tool-call-parser=${VLLM_TOOL_CALL_PARSER}
+      # Décodage contraint : c'est lui qui produit nos conclusions d'enquête,
+      # et il dominait le temps de réponse — 1,8 jeton/s contre 59 en
+      # génération libre. `xgrammar` au lieu du choix automatique, et surtout
+      # l'interdiction des espaces libres : les autoriser multiplie les
+      # chemins que la grammaire doit évaluer à chaque jeton, pour un JSON
+      # que nous analysons de toute façon.
+      - --structured-outputs-config={"backend":"xgrammar","disable_any_whitespace":true}
+      # Expose le raisonnement du modèle quand il en produit : le flux de
+      # l'assistant le relaie tel quel, sans rien fabriquer.
+      - --reasoning-parser=${VLLM_REASONING_PARSER}
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 15s
+      timeout: 10s
+      retries: 40
+      start_period: 180s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ---------------------------------------------------------------------------
+  # LiteLLM Proxy — passerelle d'inférence unique (routage, repli, traces)
+  #   Ne dépend pas de la santé de vLLM : sans GPU, le repli cloud prend le
+  #   relais et la stack reste exploitable.
+  # ---------------------------------------------------------------------------
+  litellm-proxy:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: tms-litellm-proxy
+    restart: unless-stopped
+    <<: *host-gateway
+    ports:
+      - "4000:4000"
+    depends_on:
+      langfuse-web: { condition: service_started }
+    volumes:
+      - ./litellm.yaml:/app/litellm.yaml:ro
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY}
+      DATABASE_URL: ${LITELLM_DATABASE_URL}
+      REDIS_URL: redis://host.docker.internal:${REDIS_PORT}/${REDIS_DB_LITELLM}
+      VLLM_BASE_URL: http://vllm-qwen:8000/v1
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY}
+      LANGFUSE_HOST: http://langfuse-web:3000
+    command: ["--config", "/app/litellm.yaml", "--port", "4000"]
+
+volumes:
+  clickhouse_data:
+  clickhouse_logs:
+  minio_data:

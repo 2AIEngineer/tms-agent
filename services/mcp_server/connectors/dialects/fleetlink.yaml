@@ -1,0 +1,171 @@
+# =============================================================================
+#  Dialecte « FleetLink » — TMS fictif dont aucun nom ne coïncide avec le nôtre
+# =============================================================================
+#  Ce dialecte n'existe que pour éprouver le mécanisme. Il a été écrit en
+#  prenant le contre-pied du TMS de référence sur tout ce qui pouvait l'être :
+#
+#    - préfixe d'URL différent         /resources/... au lieu de /...
+#    - noms d'endpoints différents     .../way au lieu de .../route
+#    - noms de champs différents       mss_id, thread_ref, ts, kind
+#    - structures imbriquées           from.name au lieu de origin.label
+#    - enveloppes de réponse           { "result": {...} }, { "items": [...] }
+#    - pagination par numéro de page   au lieu d'un curseur
+#    - authentification par en-tête    X-Api-Key
+#    - statuts en majuscules, plus fins que les nôtres (plusieurs -> un)
+#    - une ressource absente           l'écart à l'itinéraire n'existe pas
+#
+#  Si les mêmes assertions passent sur ce dialecte et sur celui de x_tms, alors
+#  brancher un TMS est bien devenu un travail de configuration.
+# =============================================================================
+
+tms_id: fleetlink
+label: FleetLink (TMS fictif de validation)
+description: >
+  TMS fictif aux conventions délibérément différentes, utilisé pour vérifier
+  qu'aucun nom du TMS de référence n'a fui dans le code.
+
+auth:
+  style: api_key_header
+  header: X-Api-Key
+  prefix: ""
+  secret_env: FLEETLINK_API_KEY
+
+pagination:
+  style: page
+  items_path: items
+  has_more_path: meta.more
+  limit_param: per_page
+  page_param: page
+  first_page: 1
+  page_size: 50
+  max_pages: 20
+
+operations:
+  health: { path: /resources/ping, result_path: result }
+  list_missions:
+    path: /resources/transports
+    params: { state: "{statuses}" }
+  get_mission: { path: "/resources/transports/{mission_id}", result_path: result }
+  get_mission_events:
+    path: "/resources/transports/{mission_id}/timeline"
+    params: { after: "{since}" }
+  get_route: { path: "/resources/transports/{mission_id}/way", result_path: result }
+  # FleetLink ne calcule pas l'écart à l'itinéraire. Déclaré, donc documenté :
+  # le rapport de capacité en déduit que les règles de dérive sont inopérantes.
+  get_deviation: { unsupported: true }
+  get_eta: { path: "/resources/transports/{mission_id}/forecast", result_path: result }
+  get_vehicle: { path: "/resources/trucks/{vehicle_id}", result_path: result }
+  get_vehicle_positions: { path: "/resources/trucks/{vehicle_id}/trace", params: { after: "{since}" } }
+  get_driver: { path: "/resources/people/{driver_id}", result_path: result }
+  get_user: { path: "/resources/people/{user_id}", result_path: result }
+  list_users_by_role: { path: "/resources/people", params: { job: "{role}" } }
+
+fields:
+  health:
+    time: server_clock
+
+  mission:
+    id: mss_id
+    reference: thread_ref
+    status: state
+    vehicle_id: truck.ref
+    driver_id: people.driver_ref
+    planned_pickup_at: schedule.load_due
+    planned_delivery_at: schedule.drop_due
+    actual_pickup_at: schedule.load_real
+    actual_delivery_at: schedule.drop_real
+    origin.label: from.name
+    origin.lat: from.y
+    origin.lon: from.x
+    destination.label: to.name
+    destination.lat: to.y
+    destination.lon: to.x
+
+  event:
+    id: evt_uuid
+    mission_id: mss_id
+    type: kind
+    occurred_at: ts
+    source: emitter
+    payload: extra
+    position: geo
+
+  position:
+    lat: y
+    lon: x
+    heading: bearing
+    speed_kmh: velocity
+    recorded_at: measured_at
+
+  vehicle:
+    id: ref
+    plate: registration
+    status: state
+    last_seen_at: last_ping
+    current_position: geo
+    current_mission_id: assigned_transport
+
+  driver:
+    id: ref
+    name: full_name
+    phone: contact.mobile
+    email: contact.mail
+    role: job
+    management_level: tier
+
+  user:
+    id: ref
+    name: full_name
+    phone: contact.mobile
+    email: contact.mail
+    role: job
+    management_level: tier
+
+  eta:
+    planned_delivery_at: due_at
+    current_eta: forecast_at
+    delay_minutes: lateness_min
+    remaining_distance_km: left_km
+    computed_at: as_of
+
+  route:
+    distance_km: total_km
+    duration_minutes: total_min
+
+  waypoint:
+    lat: y
+    lon: x
+
+lists:
+  mission.events: { path: timeline, item: event }
+  route.waypoints: { path: geometry.points, item: waypoint }
+
+enums:
+  # Plusieurs statuts FleetLink se replient sur un seul des nôtres : c'est le
+  # cas courant, un TMS étant souvent plus granulaire que notre pivot.
+  mission_status:
+    planned: [SCHEDULED, BOOKED, ASSIGNED]
+    in_progress: [RUNNING, EN_ROUTE, AT_PICKUP, AT_DROP]
+    completed: [DONE, CLOSED]
+    cancelled: [ABORTED, VOID]
+
+  vehicle_status:
+    idle: [PARKED]
+    moving: [ROLLING]
+    stopped: [HALTED]
+    offline: [NO_SIGNAL]
+
+  event_type:
+    arrived_pickup: [PICKUP_ARRIVAL]
+    loading_started: [LOAD_BEGIN]
+    loading_completed: [LOAD_END]
+    departed_pickup: [PICKUP_DEPARTURE]
+    arrived_delivery: [DROP_ARRIVAL]
+    unloading_started: [UNLOAD_BEGIN]
+    unloading_completed: [UNLOAD_END]
+    driver_message: [DRIVER_NOTE, DRIVER_ALERT]
+    deviation_detected: [OFF_ROUTE]
+
+  event_source:
+    driver_app: [MOBILE]
+    tms: [BACKOFFICE]

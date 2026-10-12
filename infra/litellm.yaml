@@ -1,0 +1,74 @@
+# =============================================================================
+#  LiteLLM Proxy — configuration de développement
+# =============================================================================
+#  Point d'accès unique à l'inférence pour `agent_service`. Le code applicatif
+#  ne connaît que le nom logique du modèle (`mission-investigator`) : changer de
+#  fournisseur ou passer du GPU local au cloud se fait ici, sans toucher au code.
+# =============================================================================
+
+model_list:
+  # --- Primaire : vLLM local (profil `gpu` de la stack) ---
+  - model_name: mission-investigator
+    litellm_params:
+      model: openai/local-qwen
+      api_base: os.environ/VLLM_BASE_URL
+      api_key: "none"
+    model_info:
+      mode: chat
+      supports_function_calling: true
+      # Déclarée pour que la passerelle sache quand une requête ne tiendra pas,
+      # et puisse la router vers le repli plutôt que de la laisser échouer. À
+      # tenir aligné sur VLLM_MAX_MODEL_LEN.
+      max_input_tokens: 32768
+
+  # --- Repli cloud : utilisé si vLLM est absent, saturé ou en erreur ---
+  #     Qwen3.8-27B est le modèle retenu pour l'option 2 de l'architecture
+  #     cible (API managée) : le repli de dev teste donc déjà ce modèle.
+  - model_name: mission-investigator-backup
+    litellm_params:
+      model: groq/qwen/qwen3.8-27b
+      api_key: os.environ/GROQ_API_KEY
+    model_info:
+      mode: chat
+      supports_function_calling: true
+
+  # --- Alias explicite vers le repli, pour les tests sans GPU ---
+  - model_name: mission-investigator-cloud
+    litellm_params:
+      model: groq/qwen/qwen3.8-27b
+      api_key: os.environ/GROQ_API_KEY
+
+router_settings:
+  routing_strategy: simple-shuffle
+  num_retries: 2
+  timeout: 120
+  # Cache et compteurs partagés entre réplicas : Redis natif de l'hôte, base 1
+  redis_url: os.environ/REDIS_URL
+  fallbacks:
+    - mission-investigator: ["mission-investigator-backup"]
+  # Repli **spécifique au dépassement de fenêtre** : une requête trop longue
+  # pour le modèle local part au repli cloud, dont la fenêtre est bien plus
+  # large, au lieu d'être refusée. C'est un filet de plus derrière la
+  # compaction faite côté agent — ni l'un ni l'autre ne suffit seul : le quota
+  # du palier gratuit du repli se heurte aussi aux requêtes trop grosses.
+  context_window_fallbacks:
+    - mission-investigator: ["mission-investigator-backup"]
+
+litellm_settings:
+  # Toutes les traces d'inférence partent vers Langfuse, succès comme échecs.
+  # `langfuse_otel` et non `langfuse` : Langfuse v4 a fermé l'ancien endpoint
+  # /api/public/ingestion aux traces (il n'accepte plus que les scores) et
+  # n'ingère les traces que par OTLP, sur /api/public/otel/v1/traces.
+  # `callbacks` (et non success/failure_callback) : les intégrations de type
+  # OpenTelemetry doivent être enregistrées comme callbacks complets pour que
+  # l'exporteur OTLP soit instancié.
+  callbacks: ["langfuse_otel"]
+  drop_params: true
+  # Journalise les prompts et réponses en local (données de mission non sensibles
+  # en POC ; à revoir avant toute donnée client réelle)
+  turn_off_message_logging: false
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # Clés virtuelles, journal des dépenses et UI : stockés dans litellm_db
+  store_model_in_db: false

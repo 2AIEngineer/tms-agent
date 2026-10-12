@@ -1,0 +1,172 @@
+# =============================================================================
+#  Dialecte du TMS de référence (x_tms)
+# =============================================================================
+#  Ce fichier répond, pour ce TMS, à une seule question posée champ par champ :
+#  « ce que le connecteur sait lire, quelle est sa correspondance ici ? »
+#
+#  Ses noms coïncident avec les nôtres parce que le contrat pivot a été dessiné
+#  en regardant ce TMS. Un dialecte où tout se ressemble reste donc utile : il
+#  prouve que la config suffit à décrire un TMS réel, et il sert de modèle.
+#  Voir `fleetlink.yaml` pour un TMS dont rien ne coïncide.
+# =============================================================================
+
+tms_id: x_tms
+label: TMS de référence (simulateur)
+description: >
+  API REST /v1 du TMS simulé : missions, événements, itinéraire, écart, ETA,
+  véhicules, chauffeurs et annuaire. Lecture seule, pagination par curseur.
+
+auth:
+  style: none
+
+pagination:
+  style: cursor
+  items_path: data
+  cursor_param: cursor
+  cursor_path: pagination.cursor
+  has_more_path: pagination.has_more
+  limit_param: limit
+  page_size: 200
+  max_pages: 50
+
+# --- Opérations ---------------------------------------------------------------
+operations:
+  health: { path: /health }
+  list_missions: { path: /missions, params: { status: "{statuses}" } }
+  get_mission: { path: "/missions/{mission_id}" }
+  get_mission_events: { path: "/missions/{mission_id}/events", params: { since: "{since}" } }
+  get_route: { path: "/missions/{mission_id}/route" }
+  get_deviation: { path: "/missions/{mission_id}/deviation" }
+  get_eta: { path: "/missions/{mission_id}/eta" }
+  get_vehicle: { path: "/vehicles/{vehicle_id}" }
+  get_vehicle_positions: { path: "/vehicles/{vehicle_id}/positions", params: { since: "{since}" } }
+  get_driver: { path: "/drivers/{driver_id}" }
+  get_user: { path: "/users/{user_id}" }
+  list_users_by_role: { path: "/roles/{role}/users" }
+
+# --- Champs : chemin chez nous -> chemin chez eux -----------------------------
+fields:
+  health:
+    time: time
+
+  mission:
+    id: id
+    reference: reference
+    status: status
+    vehicle_id: vehicle_id
+    driver_id: driver_id
+    planned_pickup_at: planned_pickup_at
+    planned_delivery_at: planned_delivery_at
+    actual_pickup_at: actual_pickup_at
+    actual_delivery_at: actual_delivery_at
+    origin.label: origin.label
+    origin.lat: origin.lat
+    origin.lon: origin.lon
+    destination.label: destination.label
+    destination.lat: destination.lat
+    destination.lon: destination.lon
+
+  event:
+    id: id
+    mission_id: mission_id
+    type: type
+    occurred_at: occurred_at
+    source: source
+    payload: payload
+    position: position
+
+  position:
+    lat: lat
+    lon: lon
+    heading: heading
+    speed_kmh: speed_kmh
+    recorded_at: recorded_at
+
+  vehicle:
+    id: id
+    plate: plate
+    status: status
+    last_seen_at: last_seen_at
+    current_position: current_position
+    current_mission_id: current_mission_id
+
+  driver:
+    id: id
+    name: name
+    phone: phone
+    email: email
+    role: role
+    management_level: management_level
+    status: status
+    current_mission_id: current_mission_id
+
+  user:
+    id: id
+    name: name
+    phone: phone
+    email: email
+    role: role
+    management_level: management_level
+
+  deviation:
+    current_offset_km: current_offset_km
+    current_offset_since: current_offset_since
+    duration_minutes: duration_minutes
+    severity: severity
+    computed_at: computed_at
+    vehicle_position: vehicle_position
+
+  eta:
+    planned_delivery_at: planned_delivery_at
+    current_eta: current_eta
+    delay_minutes: delay_minutes
+    remaining_distance_km: remaining_distance_km
+    computed_at: computed_at
+
+  route:
+    distance_km: distance_km
+    # Le TMS exprime la durée en minutes sous un nom abrégé.
+    duration_minutes: duration_min
+
+  waypoint:
+    lat: lat
+    lon: lon
+
+# --- Listes : où elles se trouvent, et ce que décrit un élément ---------------
+lists:
+  mission.events: { path: events, item: event }
+  route.waypoints: { path: waypoints, item: waypoint }
+
+# --- Énumérations : valeur canonique -> valeurs du TMS ------------------------
+enums:
+  mission_status:
+    planned: [planned]
+    in_progress: [in_progress]
+    completed: [completed]
+    cancelled: [cancelled]
+
+  vehicle_status:
+    idle: [idle]
+    moving: [moving]
+    stopped: [stopped]
+    offline: [offline]
+
+  event_type:
+    arrived_pickup: [arrived_pickup]
+    loading_started: [loading_started]
+    loading_completed: [loading_completed]
+    departed_pickup: [departed_pickup]
+    arrived_delivery: [arrived_delivery]
+    unloading_started: [unloading_started]
+    unloading_completed: [unloading_completed]
+    driver_message: [driver_message]
+    deviation_detected: [deviation_detected]
+
+  event_source:
+    driver_app: [driver_app]
+    tms: [tms]
+
+  deviation_severity:
+    low: [low]
+    medium: [medium]
+    high: [high]
