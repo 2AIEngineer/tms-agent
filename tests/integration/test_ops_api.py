@@ -422,6 +422,48 @@ class TestAssistant:
         assert vol["messages"] == []
 
 
+class TestIdentiteEtListeDesConversations:
+    """Ce dont l'interface a besoin pour s'afficher : qui suis-je, et mes fils."""
+
+    async def test_me_rend_les_droits_du_role(self, database):
+        lecture = make_app(database, roles=("operations_director",))
+        agent = make_app(database, roles=("ops_agent",), tms_ids=("x_tms",))
+
+        async with client(lecture) as http:
+            seul = (await http.get("/assistant/me")).json()
+        async with client(agent) as http:
+            agit = (await http.get("/assistant/me")).json()
+
+        assert seul["operator_id"] == OPERATOR
+        assert seul["can_read"] is True
+        assert seul["can_act"] is False
+        assert agit["can_act"] is True
+        assert agit["tms_ids"] == ["x_tms"]
+
+    async def test_me_exige_un_jeton(self, database):
+        app = make_app(database, roles=None)
+        async with client(app) as http:
+            assert (await http.get("/assistant/me")).status_code == 401
+
+    async def test_liste_limitee_aux_conversations_de_lappelant(self, database):
+        repository = ConversationRepository()
+        async with database.transaction() as connection:
+            mienne = await repository.open(
+                connection, operator_id=OPERATOR, title="ma question", mode=AssistantMode.CHAT
+            )
+            await repository.open(
+                connection, operator_id="autre-operateur", title="confidentiel", mode=AssistantMode.CHAT
+            )
+        app = make_app(database)
+
+        async with client(app) as http:
+            body = (await http.get("/assistant/conversations")).json()
+
+        assert body["count"] == 1
+        assert body["conversations"][0]["conversation_id"] == str(mienne)
+        assert body["conversations"][0]["title"] == "ma question"
+
+
 class TestValidationDesActions:
     """La validation humaine, vue de l'API.
 

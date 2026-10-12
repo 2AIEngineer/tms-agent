@@ -272,6 +272,50 @@ async def reports(
     return {"count": len(rendered), "reports": to_jsonable(rendered)}
 
 
+@router.get("/me")
+async def me(caller: ReadAccess) -> dict[str, Any]:
+    """Qui est l'appelant et ce qu'il peut faire.
+
+    L'interface en tire le seul affichage qui dépende du rôle : proposer ou non
+    l'autorisation d'agir. Le serveur reste juge — masquer un bouton n'est pas
+    un contrôle d'accès.
+    """
+    return {
+        "operator_id": caller.operator_id,
+        "name": caller.name,
+        "roles": list(caller.roles),
+        "tms_ids": list(caller.tms_ids),
+        "can_read": caller.may(Permission.READ),
+        "can_act": caller.may(Permission.ACT),
+    }
+
+
+@router.get("/conversations")
+async def conversations(
+    caller: ReadAccess,
+    database: Db,
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+) -> dict[str, Any]:
+    """Conversations de l'appelant, la plus récemment active d'abord.
+
+    Toujours filtrées sur l'identité du jeton : la liste d'un collègue n'est
+    jamais atteignable, quel que soit le paramètre.
+    """
+    repository = ConversationRepository()
+    async with database.connection() as connection:
+        rows = await repository.recent(connection, caller.operator_id, limit=limit)
+    items = [
+        {
+            "conversation_id": str(row["id"]),
+            "title": row["title"],
+            "mode": row["mode"],
+            "updated_at": row["updated_at"],
+        }
+        for row in rows
+    ]
+    return {"count": len(items), "conversations": to_jsonable(items)}
+
+
 @router.get("/conversations/{conversation_id}")
 async def conversation(
     conversation_id: uuid.UUID,

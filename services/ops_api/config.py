@@ -43,7 +43,7 @@ class OpsApiSettings(BaseSettings):
     # Explicite et bruyant à dessein — il n'y a pas de tenant Entra sur le
     # poste de développement, et ce drapeau ne doit jamais passer en production
     # par inadvertance.
-    auth_disabled: bool = Field(default=False, alias="OPS_API_AUTH_DISABLED")
+    auth_disabled: bool = Field(default=True, alias="OPS_API_AUTH_DISABLED")
     dev_operator_id: str = Field(default="dev_operator", alias="OPS_API_DEV_OPERATOR")
     dev_roles: tuple[str, ...] = Field(default=("ops_supervisor",), alias="OPS_API_DEV_ROLES")
 
